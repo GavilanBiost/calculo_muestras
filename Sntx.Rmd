@@ -1,0 +1,342 @@
+---
+title: "Selección Muestras"
+author: "JFGG"
+date: "2024-09-02"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introducción:
+
+El siguiente informe se crea para explicar la selección de muestras que se realizarán para un estudio de casos - control con diabéticos incidentes. El estudio se realizará con 600 personas que han desarrollado diabetes a lo largo del estudio y se seleccionarán otras 600 personas según edad, sexo, imc y glucosa. Para esta finalidad, se partirá de la base de datos de eventos de diabetes: ev_diab_2023-11-14 y se fusionará con la base de datos general.
+
+La finalidad de tener estas tres listas es: 
+
+1. Disponer de los datos necesarios para hacer el match. 
+2. Asegurarse que hay muestra de esos participantes.
+
+En principio, y salvo que se diga lo contrario posteriormente, se mirará datos en la visita basal.
+
+## Bases de datos:
+
+```{r}
+library(haven)
+library(readxl)
+library(dplyr)
+```
+
+
+## Generación de la BBDD de selección:
+
+Genero una BBDD con las variables que se utilizarán en el análisis:
+
+```{r}
+#colnames(BBDD)
+BBDD_selec = subset(BBDD, diab_prev_s1 == 0) #Descarto diabéticos
+BBDD_selec = BBDD_selec[,c("paciente", "sexo_s1", "grupo_int_v00","imc_v00", "edad_s1", "glucosa_v00", "trigli_v00")] #Selecciono las variables para hacer el match
+```
+
+
+Preparo la BBDD de la incidencia de diabetes:
+
+```{r}
+diab_selec = diab[,c("paciente", "diabetes")] #seleccion de variables de interés
+```
+
+
+Fusiono la selección de variables con la incidencia de diabetes:
+
+```{r}
+BBDD_selec_inci = merge(BBDD_selec, diab_selec, by = "paciente")
+```
+
+
+Sutituyo NAs por 0:
+
+```{r}
+BBDD_selec_inci$diabetes[is.na(BBDD_selec_inci$diabetes)] = 0
+```
+
+
+Creo la BBDD con los participantes con muestra:
+
+```{r}
+colnames(Biobanc)
+colnames(Biobanc)[3] = "paciente" #Renombro la variable
+```
+
+
+Modifico paciente para dejar solo los ids:
+
+```{r}
+Biobanc$paciente1 = Biobanc$paciente %>% #variable a modificar
+  gsub("^.*?(\\d{5}).*$", "\\1", .) %>%  #Elimino todo antes del {} y después. El nº son los nºs que deben quedar
+  as.numeric() #lo hago numérico
+```
+
+
+Elimino duplicados:
+
+```{r}
+Biobanc1 = Biobanc %>% #bbdd
+  distinct(paciente1, .keep_all = F) %>% #Participantes con muestras
+  rename(paciente = paciente1) #renombro la variable para que coincida con las otras BBDD
+```
+
+
+Preparo la BBDD para la selección:
+
+```{r}
+All = merge(BBDD_selec_inci, Biobanc1, by = "paciente")
+All_limpio = na.omit(All) #Se eliminan 29 participantes con NAs
+
+All_limpio = All_limpio %>% #bbdd
+  select(1,8,2,3,4,5,6,7) #selecciono y ordeno las variables que necesito (paciente, diabetes, el resto)
+str(All_limpio)
+All_limpio = All_limpio %>% #bbdd
+  mutate(across(c(2:4), as.factor)) #indico que variables hago categóricas
+str(All_limpio)
+```
+
+
+Realizo los emparejamientos a cada caso de forma aleatoria:
+
+```{r}
+library(MatchIt)
+# Emparejamiento con matchit:
+set.seed(13)  # Para la reproducibilidad
+matched_data = matchit(diabetes ~ edad_s1 + sexo_s1 + glucosa_v00 + imc_v00 + grupo_int_v00 + trigli_v00, #covariables para el match
+                        data = All_limpio,  #bbdd
+                        method = "nearest", #emparejamiento al vecino más cercano
+                        ratio = 1) #ratio de emparejamiento
+
+summary(matched_data) # Comprobación de la distribución de las variables
+```
+
+
+Debido a las características de la población, hay diferencias significativas basales entre los incidentes en diabetes y los no incidentes. Ajusto por la variable en continua y añado grupo de intervención.
+
+14/10/2024 --\> tras consultar al IP, también añado triglicéridos a la selección para evitar que salgan resultados significativos
+
+Obtengo los datos emparejados:
+
+```{r}
+matched_df = match.data(matched_data) #Estraigo el df con todos los casos emparejados
+```
+
+
+Selecciono aleatoriamente 600 casos (y sus respectivos controles):
+
+```{r}
+matched_sample = matched_df %>% #bbdd
+  group_by(diabetes) %>% #agrupo por diabetes
+  sample_n(size = 600) #indico de cuanto quiero la selección
+```
+
+
+Genero una tabla con las características basales de los participantes seleccionados:
+
+```{r}
+ids = data.frame(matched_sample[,1:2]) #ids seleccionados
+
+ids = merge(ids, BBDD, by = "paciente")
+
+#rio::export(ids, "20241014_matched_sample.xlsx")
+```
+
+
+Seleccion de variables para la tabla descriptiva:
+
+```{r}
+tablas = ids[,c("paciente", "diabetes", "sexo_s1", "imc_v00", "edad_s1", "escola_v00",
+                "p17_total_v00", "hdl_v00", "ldl_calc_v00", "glucosa_v00",
+                "trigli_v00", "energiat_v00", "alcoholg_v00", "grupo_int_v00")] #variables de interés
+
+tablas = tablas %>% #bbdd
+  mutate(across(c(2,3,6,14), as.factor)) #transformo la variables cat en cat
+```
+
+
+Calculo las medias/medianas/sd/pvalue de cada variable:
+
+```{r}
+resultados_cont = list() 
+resultados_cat = list()
+
+# Loop para recorrer todas las columnas del data frame, excepto la variable de referencia 'diabetes'
+for (var in setdiff(names(tablas[,2:14]), "diabetes")) {
+  # Identificar si la variable es continua (numérica) o categórica (factor/character)
+  if (is.numeric(tablas[[var]])) {
+    # Para variables numéricas (continuas)
+    t_test = t.test(tablas[[var]] ~ tablas$diabetes)
+    
+    resultados_cont[[var]] = list(
+      media = round(tapply(tablas[[var]], tablas$diabetes, mean, na.rm = T),2),
+      mediana = round(tapply(tablas[[var]], tablas$diabetes, median, na.rm = T),2),
+      desviacion_estandar = round(tapply(tablas[[var]], tablas$diabetes, sd, na.rm = T),2),
+      p_valor_t_test = round(t_test$p.value,3)
+    )
+  } else if (is.factor(tablas[[var]]) || is.character(tablas[[var]])) {
+    # Para variables categóricas (factores o caracteres)
+    tabla = table(tablas[[var]], tablas$diabetes)
+    chisq_test = chisq.test(tabla)
+    
+    resultados_cat[[var]] = list(
+      n = as.list(table((tablas[[var]]), tablas$diabetes)),
+      porcentaje = as.list(round(prop.table(table(tablas[[var]], tablas$diabetes)) * 100,2)),
+      p_valor_chisq = round(chisq_test$p.value,3)
+    )
+  }
+}
+
+# Mostrar los resultados
+tabla_cont = resultados_cont %>%
+  unlist() %>%
+  matrix(ncol = 7, byrow = T,
+         dimnames = list(c("imc","edad","p17","hdl","ldl","glucosa","trigliceridos","energia total","alcohol"),
+                         c("media_diab", "media_nodiab", "medina_diab", "medina_nodiab", "SD_diab", "SD_nodiab", "p-value"))) %>%
+  data.frame(stringsAsFactors=FALSE)
+tabla_cont$names = rownames(tabla_cont)  
+rio::export(tabla_cont, "20241011_caracteristicas_basales_cont.xlsx")
+
+tabla_cat_sex = resultados_cat$sexo_s1 %>%
+  unlist() %>%
+  matrix(ncol = 5, byrow = F, 
+         dimnames = list(c("Hombre","Mujer"),
+                        c("n diab", "n no diab", "% diab", "% no diab", "p-value"))) %>%
+  data.frame(stringsAsFactors=FALSE)
+
+tabla_cat_es = resultados_cat$escola_v00 %>%
+  unlist() %>%
+  matrix(nrow = 6, ncol = 5,  byrow = F,
+         dimnames = list(c("Tit superior","Dipl univer","Secundaria","Primaria","Analfabeto","NA"), 
+                         c("n diab", "n no diab", "% diab", "% no diab", "p-value"))) %>%
+  data.frame(stringsAsFactors=FALSE)
+
+tabla_cat_int = resultados_cat$grupo_int_v00 %>%
+  unlist() %>%
+  matrix(ncol = 5, byrow = F, 
+         dimnames = list(c("Control","Intervención"),
+                        c("n diab", "n no diab", "% diab", "% no diab", "p-value"))) %>%
+  data.frame(stringsAsFactors=FALSE)
+
+tabla_cat = rbind(tabla_cat_sex, tabla_cat_es, tabla_cat_int)
+tabla_cat$names = rownames(tabla_cat)  
+rio::export(tabla_cat, "20241011_caracteristicas_basales_cat.xlsx")
+```
+
+
+## Base de datos final:
+
+Finalmente, para obtener la base de datos final con la información necesaria, utilizaré ids, diab y la base de datos más actual que dispongo con todos los datos del BBDD: BBDD_2024_01_18 (ojo con esta base de datos. Fue generada para los artículos de COVID y no está totalmente comprobada. Puede haber errores en las vistas posteriores a la visita 3).
+
+```{r}
+ids1 = data.frame(paciente = ids[,1])
+ids1 = merge(ids1, diab[,c("paciente", "diabetes", "fecha_ev")], by = "paciente")
+BBDD_2024_01_18 = read_dta("G:/trabajo/ARTICULOS/BBDD/BBDD/BBDD_2024_01_18.dta")
+ids1 = merge(ids1, BBDD_2024_01_18, by = "paciente")
+
+ids2 = ids1[,c("paciente", "diabetes", "sexo_s1", "imc_v00", "edad_s1", "escola_v00",
+                "p17_total_v00", "hdl_v00", "ldl_calc_v00", "glucosa_v00",
+                "trigli_v00", "energiat_v00", "alcoholg_v00", "grupo_int_v00")]
+```
+
+
+Generación de un excel con los match:
+
+```{r}
+s1 = data.frame(matched_data$subclass, matched_data$distance)
+s1 = cbind(s1, All_limpio)
+s1 = subset(s1, matched_data.subclass != "NA")
+s1 = merge(BBDD_id, s1, by = "paciente")
+#rio::export(s1, "estadisticos_seleccion.xlsx")
+
+subclass = data.frame(matched_data$subclass)
+subclass = cbind(match_id = subclass, All_limpio)
+subclass = subset(subclass, matched_data.subclass != "NA")
+subclass = merge(BBDD_id, subclass, by = "paciente")
+#rio::export(subclass, "20241021_BBDD_1200_APOCIII_diab_matched_ids.csv")
+```
+
+
+
+## Preparación Excel biobanco:
+
+El formato del nuevo id es: P2/00000/0X.
+
+```{r}
+library(dplyr)
+BBDD_id <- ids1 %>%
+  select(paciente) %>%
+  mutate(paciente = as.character(paciente))
+
+BBDD_id = BBDD_id %>%
+  mutate(patient_ID = paste0("P2/", paciente, "/00"))
+```
+
+
+A partir de aquí, creo un data frame con los ids unicos, los aleatorizo en grupos de 48 participantes y les añado los dos tiempos en la selección final:
+
+```{r}
+set.seed(123) 
+# Aleatorizar los participantes y calcular los grupos
+grupos = data.frame(
+  patient_ID = sample(unique(BBDD_id$patient_ID)),  # Aleatoriza directamente los IDs de pacientes
+  caja = rep(1:ceiling(length(unique(BBDD_id$patient_ID)) / 96), each = 96)[1:length((BBDD_id$patient_ID))]
+)
+```
+
+```{r}
+aleatorizacion = merge(grupos, BBDD_id, by = "patient_ID") #Fusion de BBDD
+aleatorizacion = aleatorizacion %>% 
+  select(caja, patient_ID) %>% #seleccion de variables de interes
+  arrange((caja)) #
+aleatorizacion$"Sample volume (µL)" = 100
+aleatorizacion$"Additional information " = NA
+aleatorizacion$"Well ID" = rep(rep(LETTERS[1:8], times = 12) %>%
+  paste0(rep(1:12, each = 8)),9)[1:1200]
+aleatorizacion$"Sample type" = "EDTA plasma"
+colnames(aleatorizacion)[1] = "Plate ID"
+colnames(aleatorizacion)[2] = "Unique Sample ID (for letters standard A-Z only)"
+aleatorizacion = aleatorizacion %>%  
+  select(1,5,2,6,3,4) #orden según excel biobanco
+```
+
+```{r}
+rio::export(aleatorizacion, "20241024_SelecSamples.xlsx")
+```
+
+
+# Modificaciones sobre las variables que nos han enviado del biobanco:
+
+```{r}
+library(readxl)
+revisar <- read_excel("G:/trabajo/Proyectos/propuestas/2024/BIOR2300034 per revisar.xlsx")
+View(revisar)
+```
+
+
+Seleccionamos la variable a revisar:
+
+```{r}
+corregir = revisar$`Unique Sample ID (for letters standard A-Z only)` #variable original a modificar
+
+matches <- corregir %>% #sobre la variable a modificar...
+  regmatches(gregexpr("\\d{4}", .)) %>% #seleccionamos el patrón de números....
+  unlist() %>% #La función anterior tiene de salida listas, deshacemos la listas y obtenemos una columna...
+  as.character() %>% #la hacemos char...
+  data.frame(IDs = .,stringsAsFactors = FALSE) %>% #renombramos la columna y le indicamos que no son factores...
+  mutate(patient_ID = paste0("P2/0", .[,1], "/00")) #Pegamos el patrón nuevo con los IDs nuevos
+```
+
+
+Añadimos la nueva variable:
+
+```{r}
+revisar = data.frame(c(revisar, matches))
+rio::export(revisar, "20241111_BIOR2300034_BBDD.xlsx")
+```
